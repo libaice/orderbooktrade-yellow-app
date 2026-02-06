@@ -190,6 +190,81 @@ export class StateManager {
         this.state = createInitialState(marketId, question);
         this.notifyListeners();
     }
+
+    /**
+     * Lock market (stop accepting new orders)
+     */
+    lockMarket(): void {
+        if (this.state.status !== 'ACTIVE') {
+            throw new Error(`Cannot lock market in ${this.state.status} status`);
+        }
+        this.state = {
+            ...this.state,
+            status: 'LOCKED',
+            sequence: this.state.sequence + 1,
+            timestamp: Date.now(),
+        };
+        this.notifyListeners();
+    }
+
+    /**
+     * Resolve market with winning outcome
+     */
+    resolveMarket(outcome: 'YES' | 'NO'): void {
+        if (this.state.status !== 'LOCKED') {
+            throw new Error(`Cannot resolve market in ${this.state.status} status. Must be LOCKED first.`);
+        }
+        this.state = {
+            ...this.state,
+            status: 'PENDING_RESOLUTION',
+            resolutionOutcome: outcome,
+            resolutionTimestamp: Date.now(),
+            sequence: this.state.sequence + 1,
+            timestamp: Date.now(),
+        };
+        this.notifyListeners();
+    }
+
+    /**
+     * Settle market (finalize and allow withdrawals)
+     */
+    settleMarket(): void {
+        if (this.state.status !== 'PENDING_RESOLUTION') {
+            throw new Error(`Cannot settle market in ${this.state.status} status`);
+        }
+        if (!this.state.resolutionOutcome) {
+            throw new Error('Resolution outcome not set');
+        }
+        this.state = {
+            ...this.state,
+            status: 'SETTLED',
+            sequence: this.state.sequence + 1,
+            timestamp: Date.now(),
+        };
+        this.notifyListeners();
+    }
+
+    /**
+     * Calculate settlement amount for a user
+     */
+    getSettlementAmount(userId: string): number {
+        if (this.state.status !== 'SETTLED' || !this.state.resolutionOutcome) {
+            return 0;
+        }
+
+        const balance = this.state.balances[userId];
+        if (!balance) {
+            return 0;
+        }
+
+        // Winning shares are worth 1 USDC each
+        const winningShares = this.state.resolutionOutcome === 'YES'
+            ? balance.yes
+            : balance.no;
+
+        // Return USDC balance + winning shares value
+        return balance.usdc + winningShares;
+    }
 }
 
 // Singleton instance

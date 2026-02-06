@@ -35,6 +35,7 @@ export function createInitialState(
     return {
         marketId,
         question,
+        status: 'ACTIVE',
         orderbook: {
             yesBids: [],
             yesAsks: [],
@@ -170,6 +171,11 @@ export class PredictionMarketMatcher {
         state: PredictionMarketState,
         request: OrderRequest
     ): string | null {
+        // Check market is active
+        if (state.status !== 'ACTIVE') {
+            return `Market is ${state.status}. Trading is not allowed.`;
+        }
+
         // Check user exists
         const userBalance = state.balances[request.userId];
         if (!userBalance) {

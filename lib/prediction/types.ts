@@ -3,6 +3,13 @@
  * Core types for binary outcome market with state channel integration
  */
 
+// Price precision constants
+export const PRICE_PRECISION = 1_000_000; // Prices stored as integers (0-1000000 = 0.000000-1.000000)
+export const TICK_SIZE = 1_000; // 0.001 minimum price increment
+
+// Market lifecycle status
+export type MarketStatus = 'ACTIVE' | 'LOCKED' | 'PENDING_RESOLUTION' | 'SETTLED';
+
 // Outcome types for binary prediction market
 export type Outcome = 'YES' | 'NO';
 
@@ -89,6 +96,8 @@ export interface PredictionMarketState {
     marketId: string;
     /** Market question */
     question: string;
+    /** Market lifecycle status */
+    status: MarketStatus;
     /** Orderbook snapshot */
     orderbook: Orderbook;
     /** User balances */
@@ -103,6 +112,10 @@ export interface PredictionMarketState {
     lastYesPrice: number | null;
     /** Last trade price for NO outcome */
     lastNoPrice: number | null;
+    /** Resolution outcome (set after market is resolved) */
+    resolutionOutcome?: Outcome;
+    /** Resolution timestamp */
+    resolutionTimestamp?: number;
 }
 
 /**

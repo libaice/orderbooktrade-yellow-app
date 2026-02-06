@@ -13,14 +13,16 @@ import { MarketHeader } from '@/components/MarketHeader';
 import { PredictionOrderbook } from '@/components/PredictionOrderbook';
 import { PredictionOrderForm } from '@/components/PredictionOrderForm';
 import { RecentTrades } from '@/components/RecentTrades';
+import { MarketLifecycle } from '@/components/MarketLifecycle';
 import {
     matcher,
     stateManager,
-    createClearNodeClient,
+    createNitroliteClient,
     type PredictionMarketState,
     type OrderRequest,
     type UserBalance,
     type OrderbookDisplay,
+    type Outcome,
 } from '@/lib/prediction';
 
 export default function PredictionMarketPage() {
@@ -92,28 +94,31 @@ export default function PredictionMarketPage() {
             stateManager.depositUSDC(1000);
             setBalance(stateManager.getUserBalance());
 
-            // Try to connect to ClearNode (may fail in demo mode)
+            // Try to connect to Yellow Nitrolite (may fail in demo mode)
             try {
                 setClearNodeStatus('connecting');
-                const clearNode = createClearNodeClient('wss://clearnet.yellow.com/ws');
+                const nitrolite = createNitroliteClient('wss://clearnet-sandbox.yellow.com/ws');
 
-                clearNode.onConnect(() => {
-                    console.log('Connected to ClearNode');
+                // Initialize with provider
+                await nitrolite.initialize(window.ethereum);
+
+                nitrolite.onConnect(() => {
+                    console.log('Connected to Yellow Nitrolite');
                     setClearNodeStatus('connected');
                 });
 
-                clearNode.onError((error) => {
-                    console.warn('ClearNode connection failed (demo mode):', error);
+                nitrolite.onError((error) => {
+                    console.warn('Nitrolite connection failed (demo mode):', error);
                     setClearNodeStatus('disconnected');
                 });
 
-                // Don't await - continue in demo mode if ClearNode unavailable
-                clearNode.connect().catch(() => {
-                    console.log('Running in demo mode (no ClearNode)');
+                // Don't await - continue in demo mode if Nitrolite unavailable
+                nitrolite.connect().catch(() => {
+                    console.log('Running in demo mode (no Nitrolite)');
                     setClearNodeStatus('disconnected');
                 });
             } catch (e) {
-                console.log('ClearNode unavailable, running in demo mode');
+                console.log('Nitrolite unavailable, running in demo mode');
                 setClearNodeStatus('disconnected');
             }
 
@@ -174,6 +179,37 @@ export default function PredictionMarketPage() {
             }
         }
     }, [clearNodeStatus]);
+
+    // Market lifecycle handlers
+    const handleLockMarket = () => {
+        try {
+            stateManager.lockMarket();
+            console.log('Market locked');
+        } catch (error) {
+            console.error('Failed to lock market:', error);
+            alert(error instanceof Error ? error.message : 'Failed to lock market');
+        }
+    };
+
+    const handleResolveMarket = (outcome: Outcome) => {
+        try {
+            stateManager.resolveMarket(outcome);
+            console.log(`Market resolved: ${outcome}`);
+        } catch (error) {
+            console.error('Failed to resolve market:', error);
+            alert(error instanceof Error ? error.message : 'Failed to resolve market');
+        }
+    };
+
+    const handleSettleMarket = () => {
+        try {
+            stateManager.settleMarket();
+            console.log('Market settled');
+        } catch (error) {
+            console.error('Failed to settle market:', error);
+            alert(error instanceof Error ? error.message : 'Failed to settle market');
+        }
+    };
 
     // Price click handler
     const handlePriceClick = (price: number, side: 'BUY' | 'SELL') => {
@@ -257,10 +293,10 @@ export default function PredictionMarketPage() {
                                 ⚡ Prediction Market
                             </h1>
                             <span className={`px-2 py-1 text-xs rounded ${clearNodeStatus === 'connected'
-                                    ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
-                                    : clearNodeStatus === 'connecting'
-                                        ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400'
-                                        : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500'
+                                ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
+                                : clearNodeStatus === 'connecting'
+                                    ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400'
+                                    : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500'
                                 }`}>
                                 {clearNodeStatus === 'connected' ? '🟢 ClearNode' :
                                     clearNodeStatus === 'connecting' ? '🟡 Connecting...' :
@@ -369,7 +405,7 @@ export default function PredictionMarketPage() {
                         </div>
 
                         {/* Trading Interface */}
-                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
                             {/* Order Book */}
                             <div>
                                 {orderbookDisplay && state && (
@@ -389,6 +425,22 @@ export default function PredictionMarketPage() {
                                     onSubmitOrder={handleSubmitOrder}
                                     userId={address}
                                 />
+                            </div>
+
+                            {/* Market Lifecycle */}
+                            <div>
+                                {state && (
+                                    <MarketLifecycle
+                                        status={state.status}
+                                        resolutionOutcome={state.resolutionOutcome}
+                                        resolutionTimestamp={state.resolutionTimestamp}
+                                        onLockMarket={handleLockMarket}
+                                        onResolveMarket={handleResolveMarket}
+                                        onSettleMarket={handleSettleMarket}
+                                        settlementAmount={address ? stateManager.getSettlementAmount(address) : undefined}
+                                        isAdmin={true}
+                                    />
+                                )}
                             </div>
 
                             {/* Recent Trades */}
