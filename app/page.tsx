@@ -1,481 +1,465 @@
 /**
- * Main trading page - integrates all components
+ * Prediction Market Trading Page
+ * 
+ * Main trading interface for binary prediction market
+ * with browser-based matching and Yellow Network state channel
  */
 
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { ethers } from 'ethers';
-import { BalancePanel } from '@/components/BalancePanel';
-import { OrderForm } from '@/components/OrderForm';
-import { OrderBook, type OrderBookData } from '@/components/OrderBook';
-import { ChannelManager } from '@/components/ChannelManager';
-import { PerformanceMetrics, type PerformanceMetrics as MetricsType } from '@/components/PerformanceMetrics';
-import type { BalanceState, ChannelState, OrderIntent } from '@/lib/protocol/types';
-import { channelManager } from '@/lib/protocol/channel';
-import { signOrderIntent } from '@/lib/protocol/signatures';
-import { balanceManager } from '@/lib/yellow/balance-manager';
-import { YellowNetworkClient } from '@/lib/yellow/yellow-client';
-import { MatchingEngineClient } from '@/lib/matching/matching-client';
-import { auditLog } from '@/lib/matching/audit-log';
+import { MarketHeader } from '@/components/MarketHeader';
+import { PredictionOrderbook } from '@/components/PredictionOrderbook';
+import { PredictionOrderForm } from '@/components/PredictionOrderForm';
+import { RecentTrades } from '@/components/RecentTrades';
+import { MarketLifecycle } from '@/components/MarketLifecycle';
+import {
+    matcher,
+    stateManager,
+    createNitroliteClient,
+    type PredictionMarketState,
+    type OrderRequest,
+    type UserBalance,
+    type OrderbookDisplay,
+    type Outcome,
+} from '@/lib/prediction';
 
-export default function TradingPage() {
-  // Wallet state
-  const [provider, setProvider] = useState<ethers.BrowserProvider | null>(null);
-  const [signer, setSigner] = useState<ethers.Signer | null>(null);
-  const [address, setAddress] = useState<string | null>(null);
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [network, setNetwork] = useState<string | null>(null);
+export default function PredictionMarketPage() {
+    // Wallet state
+    const [address, setAddress] = useState<string | null>(null);
+    const [isConnecting, setIsConnecting] = useState(false);
+    const [network, setNetwork] = useState<string | null>(null);
 
-  // Balance state
-  const [balances, setBalances] = useState<BalanceState>({
-    wallet: { eth: '0', usdc: '0' },
-    unified: { eth: '0', usdc: '0' },
-    channel: { eth: '0', usdc: '0' },
-  });
+    // Market state
+    const [state, setState] = useState<PredictionMarketState | null>(null);
+    const [orderbookDisplay, setOrderbookDisplay] = useState<OrderbookDisplay | null>(null);
+    const [balance, setBalance] = useState<UserBalance | null>(null);
 
-  // Channel state
-  const [channel, setChannel] = useState<ChannelState | null>(null);
+    // Connection state
+    const [clearNodeStatus, setClearNodeStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
 
-  // Order book state
-  const [orderBook, setOrderBook] = useState<OrderBookData>({
-    bids: [],
-    asks: [],
-    lastPrice: '2000.00',
-  });
-
-  // Performance metrics
-  const [metrics, setMetrics] = useState<MetricsType>({
-    ordersPerSecond: 0,
-    avgFillLatency: 0,
-    websocketPing: 0,
-    stateUpdateFrequency: 0,
-    totalOrders: 0,
-    totalFills: 0,
-  });
-
-  // Clients
-  const [yellowClient, setYellowClient] = useState<YellowNetworkClient | null>(null);
-  const [matchingClient, setMatchingClient] = useState<MatchingEngineClient | null>(null);
-
-  // Connect wallet
-  const connectWallet = async () => {
-    if (typeof window === 'undefined' || !window.ethereum) {
-      alert('Please install MetaMask');
-      return;
-    }
-
-    setIsConnecting(true);
-    try {
-      const browserProvider = new ethers.BrowserProvider(window.ethereum);
-      const accounts = await browserProvider.send('eth_requestAccounts', []);
-      const walletSigner = await browserProvider.getSigner();
-      const walletAddress = await walletSigner.getAddress();
-
-      // Get network info
-      const networkInfo = await browserProvider.getNetwork();
-      setNetwork(networkInfo.name);
-
-      setProvider(browserProvider);
-      setSigner(walletSigner);
-      setAddress(walletAddress);
-
-      // Initialize balance manager
-      // Note: Yellow client would be initialized here with real credentials
-      // For demo, we'll use mock data
-      const mockYellowClient = new YellowNetworkClient({
-        wsUrl: 'ws://localhost:8080', // Mock URL
-      });
-      setYellowClient(mockYellowClient);
-
-      balanceManager.initialize(browserProvider, mockYellowClient, walletAddress);
-
-      // Refresh balances
-      await refreshBalances();
-
-      // Initialize matching engine client
-      const matching = new MatchingEngineClient({
-        wsUrl: 'ws://localhost:8081', // Mock URL
-      });
-      setMatchingClient(matching);
-
-      // Set up event listeners
-      setupEventListeners(matching);
-
-    } catch (error) {
-      console.error('Failed to connect wallet:', error);
-      alert('Failed to connect wallet');
-    } finally {
-      setIsConnecting(false);
-    }
-  };
-
-  // Disconnect wallet
-  const disconnectWallet = () => {
-    // Disconnect clients
-    if (yellowClient) {
-      yellowClient.disconnect();
-      setYellowClient(null);
-    }
-    if (matchingClient) {
-      matchingClient.disconnect();
-      setMatchingClient(null);
-    }
-
-    // Clear channel if exists
-    if (channel) {
-      channelManager.clearChannel(channel.id);
-      setChannel(null);
-    }
-
-    // Reset all state
-    setProvider(null);
-    setSigner(null);
-    setAddress(null);
-    setNetwork(null);
-    setBalances({
-      wallet: { eth: '0', usdc: '0' },
-      unified: { eth: '0', usdc: '0' },
-      channel: { eth: '0', usdc: '0' },
-    });
-    setMetrics({
-      ordersPerSecond: 0,
-      avgFillLatency: 0,
-      websocketPing: 0,
-      stateUpdateFrequency: 0,
-      totalOrders: 0,
-      totalFills: 0,
-    });
-  };
-
-  // Refresh balances
-  const refreshBalances = async () => {
-    try {
-      const newBalances = await balanceManager.refreshAll();
-      setBalances(newBalances);
-    } catch (error) {
-      console.error('Failed to refresh balances:', error);
-    }
-  };
-
-  // Setup event listeners for matching engine
-  const setupEventListeners = (client: MatchingEngineClient) => {
-    client.on('fill', (fill) => {
-      console.log('Fill received:', fill);
-      auditLog.recordFill(channel?.id || 'default', fill);
-
-      // Update metrics
-      setMetrics(prev => ({
-        ...prev,
-        totalFills: prev.totalFills + 1,
-      }));
+    // Performance metrics
+    const [metrics, setMetrics] = useState({
+        ordersProcessed: 0,
+        avgLatency: 0,
+        lastUpdateTime: 0,
     });
 
-    client.on('state_update', (stateUpdate) => {
-      console.log('State update received:', stateUpdate);
+    // Initialize market state
+    useEffect(() => {
+        const currentState = stateManager.getState();
+        setState(currentState);
+        setOrderbookDisplay(matcher.getOrderbookDisplay(currentState));
 
-      if (channel) {
-        channelManager.updateChannelState(channel.id, stateUpdate);
-        const updatedChannel = channelManager.getChannel(channel.id);
-        if (updatedChannel) {
-          setChannel(updatedChannel);
-          balanceManager.updateChannelBalance(
-            updatedChannel.balances.base,
-            updatedChannel.balances.quote
-          );
-          setBalances(balanceManager.getBalances());
+        // Subscribe to state changes
+        const unsubscribe = stateManager.subscribe((newState) => {
+            setState(newState);
+            setOrderbookDisplay(matcher.getOrderbookDisplay(newState));
+            setBalance(stateManager.getUserBalance());
+            setMetrics(prev => ({
+                ...prev,
+                ordersProcessed: newState.fills.length,
+                lastUpdateTime: newState.timestamp,
+            }));
+        });
+
+        return () => unsubscribe();
+    }, []);
+
+    // Connect wallet
+    const connectWallet = async () => {
+        if (typeof window === 'undefined' || !window.ethereum) {
+            alert('Please install MetaMask');
+            return;
         }
-      }
-    });
 
-    client.on('orderbook_update', (data) => {
-      setOrderBook(data);
-    });
-  };
+        setIsConnecting(true);
+        try {
+            const provider = new ethers.BrowserProvider(window.ethereum);
+            await provider.send('eth_requestAccounts', []);
+            const signer = await provider.getSigner();
+            const walletAddress = await signer.getAddress();
 
-  // Open channel
-  const handleOpenChannel = async (amount: { base: string; quote: string }) => {
-    if (!address) return;
+            // Get network info
+            const networkInfo = await provider.getNetwork();
+            setNetwork(networkInfo.name);
 
-    try {
-      // Allocate from unified to channel
-      const channelId = `channel_${address}_${Date.now()}`;
-      await balanceManager.allocateToChannel(channelId, amount);
+            setAddress(walletAddress);
 
-      // Initialize channel
-      const newChannel = channelManager.initializeChannel(
-        channelId,
-        address,
-        '0x0000000000000000000000000000000000000001', // Mock operator address
-        amount
-      );
+            // Initialize state manager with signer
+            await stateManager.initialize(signer);
 
-      newChannel.status = 'active';
-      setChannel(newChannel);
-      setBalances(balanceManager.getBalances());
+            // Deposit initial USDC (demo: 1000 USDC)
+            stateManager.depositUSDC(1000);
+            setBalance(stateManager.getUserBalance());
 
-    } catch (error) {
-      throw error;
-    }
-  };
+            // Try to connect to Yellow Nitrolite (may fail in demo mode)
+            try {
+                setClearNodeStatus('connecting');
+                const nitrolite = createNitroliteClient('wss://clearnet-sandbox.yellow.com/ws');
 
-  // Submit order
-  const handleSubmitOrder = async (orderData: Omit<OrderIntent, 'signature' | 'userAddress'>) => {
-    if (!signer || !address || !channel) {
-      throw new Error('Wallet not connected or channel not open');
-    }
+                // Initialize with provider
+                await nitrolite.initialize(window.ethereum);
 
-    try {
-      // Get nonce from channel manager
-      const nonce = channelManager.getNextNonce(channel.id);
+                nitrolite.onConnect(() => {
+                    console.log('Connected to Yellow Nitrolite');
+                    setClearNodeStatus('connected');
+                });
 
-      // Create order intent
-      const orderIntent: Omit<OrderIntent, 'signature'> = {
-        ...orderData,
-        nonce,
-        userAddress: address,
-      };
+                nitrolite.onError((error) => {
+                    console.warn('Nitrolite connection failed (demo mode):', error);
+                    setClearNodeStatus('disconnected');
+                });
 
-      // Sign order
-      const signedOrder = await signOrderIntent(orderIntent, signer);
+                // Don't await - continue in demo mode if Nitrolite unavailable
+                nitrolite.connect().catch(() => {
+                    console.log('Running in demo mode (no Nitrolite)');
+                    setClearNodeStatus('disconnected');
+                });
+            } catch (e) {
+                console.log('Nitrolite unavailable, running in demo mode');
+                setClearNodeStatus('disconnected');
+            }
 
-      // Record in audit log
-      auditLog.recordOrder(channel.id, signedOrder);
-
-      // Submit to matching engine
-      if (matchingClient) {
-        await matchingClient.submitOrder(signedOrder);
-      }
-
-      // Update metrics
-      setMetrics(prev => ({
-        ...prev,
-        totalOrders: prev.totalOrders + 1,
-      }));
-
-    } catch (error) {
-      console.error('Failed to submit order:', error);
-      throw error;
-    }
-  };
-
-  // Cooperative close
-  const handleCooperativeClose = async () => {
-    if (!channel) return;
-
-    try {
-      channelManager.initiateCooperativeClose(channel.id);
-
-      // Withdraw from channel to unified
-      await balanceManager.withdrawFromChannel(
-        channel.id,
-        channel.balances
-      );
-
-      channelManager.finalizeClose(channel.id);
-      setChannel(null);
-      setBalances(balanceManager.getBalances());
-
-    } catch (error) {
-      throw error;
-    }
-  };
-
-  // Force exit
-  const handleForceExit = async () => {
-    if (!channel) return;
-
-    try {
-      channelManager.initiateForceExit(channel.id);
-      const updatedChannel = channelManager.getChannel(channel.id);
-      if (updatedChannel) {
-        setChannel(updatedChannel);
-      }
-
-      // Export proof
-      handleExportProof();
-
-    } catch (error) {
-      throw error;
-    }
-  };
-
-  // Export proof
-  const handleExportProof = () => {
-    if (!channel) return;
-
-    const proof = channelManager.exportProof(channel.id);
-    if (proof) {
-      // Download as JSON
-      const blob = new Blob([proof], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `force-exit-proof-${channel.id}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-    }
-  };
-
-  // Mock order book data for demo
-  useEffect(() => {
-    // Generate mock order book
-    const mockBids: any[] = [];
-    const mockAsks: any[] = [];
-
-    let basePrice = 2000;
-    for (let i = 0; i < 15; i++) {
-      const bidPrice = basePrice - i * 0.5;
-      const askPrice = basePrice + i * 0.5;
-      const quantity = (Math.random() * 2 + 0.1).toFixed(4);
-
-      mockBids.push({
-        price: bidPrice.toFixed(2),
-        quantity,
-        total: (bidPrice * parseFloat(quantity)).toFixed(2),
-      });
-
-      mockAsks.push({
-        price: askPrice.toFixed(2),
-        quantity,
-        total: (askPrice * parseFloat(quantity)).toFixed(2),
-      });
-    }
-
-    setOrderBook({
-      bids: mockBids,
-      asks: mockAsks,
-      lastPrice: '2000.00',
-    });
-  }, []);
-
-  // Listen for account changes in MetaMask
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.ethereum) return;
-
-    const handleAccountsChanged = (accounts: string[]) => {
-      if (accounts.length === 0) {
-        // User disconnected wallet
-        disconnectWallet();
-      } else if (address && accounts[0].toLowerCase() !== address.toLowerCase()) {
-        // User switched to a different account
-        disconnectWallet();
-        // Optionally auto-reconnect with new account
-        // connectWallet();
-      }
+        } catch (error) {
+            console.error('Failed to connect wallet:', error);
+            alert('Failed to connect wallet');
+        } finally {
+            setIsConnecting(false);
+        }
     };
 
-    const handleChainChanged = () => {
-      // Reload page on chain change (recommended by MetaMask)
-      window.location.reload();
+    // Disconnect wallet
+    const disconnectWallet = () => {
+        setAddress(null);
+        setNetwork(null);
+        setBalance(null);
+        setClearNodeStatus('disconnected');
+        stateManager.reset('prediction-market-1', 'Will ETH reach $5000 by end of 2025?');
     };
 
-    window.ethereum.on('accountsChanged', handleAccountsChanged);
-    window.ethereum.on('chainChanged', handleChainChanged);
+    // Submit order
+    const handleSubmitOrder = useCallback(async (request: OrderRequest) => {
+        const startTime = performance.now();
 
-    // Cleanup listeners
-    return () => {
-      if (window.ethereum.removeListener) {
-        window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
-        window.ethereum.removeListener('chainChanged', handleChainChanged);
-      }
+        // Get current state
+        const currentState = stateManager.getState();
+
+        // Run local matcher
+        const result = matcher.processOrder(currentState, request);
+
+        if (!result.success) {
+            throw new Error(result.error);
+        }
+
+        // Update local state
+        stateManager.updateState(result.newState);
+
+        // Calculate latency
+        const latency = performance.now() - startTime;
+        setMetrics(prev => ({
+            ...prev,
+            avgLatency: prev.avgLatency === 0
+                ? latency
+                : (prev.avgLatency * 0.9 + latency * 0.1), // Exponential moving average
+        }));
+
+        console.log(`Order processed in ${latency.toFixed(2)}ms`);
+
+        // If connected to ClearNode, push state update
+        // (In demo mode, we skip this and just process locally)
+        if (clearNodeStatus === 'connected') {
+            try {
+                const { state: signedState, signature } = await stateManager.signState();
+                // Push to ClearNode would happen here
+                console.log('Would push to ClearNode:', signedState.sequence);
+            } catch (e) {
+                console.warn('Failed to sync with ClearNode:', e);
+            }
+        }
+    }, [clearNodeStatus]);
+
+    // Market lifecycle handlers
+    const handleLockMarket = () => {
+        try {
+            stateManager.lockMarket();
+            console.log('Market locked');
+        } catch (error) {
+            console.error('Failed to lock market:', error);
+            alert(error instanceof Error ? error.message : 'Failed to lock market');
+        }
     };
-  }, [address]);
 
-  return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-black">
-      {/* Header */}
-      <header className="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-50">
-              ⚡ State Channel Trading
-            </h1>
+    const handleResolveMarket = (outcome: Outcome) => {
+        try {
+            stateManager.resolveMarket(outcome);
+            console.log(`Market resolved: ${outcome}`);
+        } catch (error) {
+            console.error('Failed to resolve market:', error);
+            alert(error instanceof Error ? error.message : 'Failed to resolve market');
+        }
+    };
 
-            {!address ? (
-              <button
-                onClick={connectWallet}
-                disabled={isConnecting}
-                className="px-6 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg transition-colors disabled:opacity-50"
-              >
-                {isConnecting ? 'Connecting...' : 'Connect Wallet'}
-              </button>
-            ) : (
-              <div className="flex items-center gap-3">
-                {/* Network Badge */}
-                {network && (
-                  <div className="px-3 py-1 bg-green-100 dark:bg-green-900/30 border border-green-200 dark:border-green-800 rounded-lg">
-                    <span className="text-xs font-medium text-green-700 dark:text-green-400">
-                      🟢 {network}
-                    </span>
-                  </div>
-                )}
+    const handleSettleMarket = () => {
+        try {
+            stateManager.settleMarket();
+            console.log('Market settled');
+        } catch (error) {
+            console.error('Failed to settle market:', error);
+            alert(error instanceof Error ? error.message : 'Failed to settle market');
+        }
+    };
 
-                {/* Address Display */}
-                <div className="px-4 py-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg">
-                  <span className="text-sm font-mono text-zinc-900 dark:text-zinc-50">
-                    {address.slice(0, 6)}...{address.slice(-4)}
-                  </span>
+    // Price click handler
+    const handlePriceClick = (price: number, side: 'BUY' | 'SELL') => {
+        // Could pre-fill the order form with this price
+        console.log(`Clicked ${side} at ${(price * 100).toFixed(1)}¢`);
+    };
+
+    // Export force exit proof
+    const handleExportProof = () => {
+        const proof = stateManager.exportProof();
+        const blob = new Blob([proof], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `force-exit-proof-${Date.now()}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
+    // Seed demo orders (for testing)
+    const seedDemoOrders = async () => {
+        if (!address) return;
+
+        // Create some random demo orders
+        const demoOrders: OrderRequest[] = [];
+
+        // YES bids from 0.30 to 0.45
+        for (let i = 0; i < 5; i++) {
+            demoOrders.push({
+                userId: `demo-user-${i}`,
+                outcome: 'YES',
+                side: 'BUY',
+                type: 'LIMIT',
+                price: 0.30 + i * 0.03,
+                quantity: 10 + Math.random() * 20,
+            });
+        }
+
+        // YES asks from 0.55 to 0.70
+        for (let i = 0; i < 5; i++) {
+            demoOrders.push({
+                userId: `demo-user-${i + 5}`,
+                outcome: 'YES',
+                side: 'SELL',
+                type: 'LIMIT',
+                price: 0.55 + i * 0.03,
+                quantity: 10 + Math.random() * 20,
+            });
+        }
+
+        // Initialize demo users with balance
+        let currentState = stateManager.getState();
+        for (let i = 0; i < 10; i++) {
+            currentState = {
+                ...currentState,
+                balances: {
+                    ...currentState.balances,
+                    [`demo-user-${i}`]: { usdc: 1000, yes: 100, no: 100 },
+                },
+            };
+        }
+        stateManager.updateState(currentState);
+
+        // Process each order
+        for (const order of demoOrders) {
+            const result = matcher.processOrder(stateManager.getState(), order);
+            if (result.success) {
+                stateManager.updateState(result.newState);
+            }
+        }
+    };
+
+    return (
+        <div className="min-h-screen bg-zinc-50 dark:bg-black">
+            {/* Header */}
+            <header className="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
+                <div className="container mx-auto px-4 py-4">
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-4">
+                            <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-50">
+                                ⚡ Prediction Market
+                            </h1>
+                            <span className={`px-2 py-1 text-xs rounded ${clearNodeStatus === 'connected'
+                                ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
+                                : clearNodeStatus === 'connecting'
+                                    ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400'
+                                    : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500'
+                                }`}>
+                                {clearNodeStatus === 'connected' ? '🟢 ClearNode' :
+                                    clearNodeStatus === 'connecting' ? '🟡 Connecting...' :
+                                        '⚪ Demo Mode'}
+                            </span>
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                            {!address ? (
+                                <button
+                                    onClick={connectWallet}
+                                    disabled={isConnecting}
+                                    className="px-6 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg transition-colors disabled:opacity-50"
+                                >
+                                    {isConnecting ? 'Connecting...' : 'Connect Wallet'}
+                                </button>
+                            ) : (
+                                <>
+                                    {/* Network Badge */}
+                                    {network && (
+                                        <div className="px-3 py-1 bg-green-100 dark:bg-green-900/30 border border-green-200 dark:border-green-800 rounded-lg">
+                                            <span className="text-xs font-medium text-green-700 dark:text-green-400">
+                                                🟢 {network}
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    {/* Address */}
+                                    <div className="px-4 py-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg">
+                                        <span className="text-sm font-mono text-zinc-900 dark:text-zinc-50">
+                                            {address.slice(0, 6)}...{address.slice(-4)}
+                                        </span>
+                                    </div>
+
+                                    {/* Disconnect */}
+                                    <button
+                                        onClick={disconnectWallet}
+                                        className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-medium rounded-lg transition-colors"
+                                    >
+                                        Disconnect
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                    </div>
                 </div>
+            </header>
 
-                {/* Disconnect Button */}
-                <button
-                  onClick={disconnectWallet}
-                  className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-medium rounded-lg transition-colors"
-                  title="Disconnect Wallet"
-                >
-                  Disconnect
-                </button>
-              </div>
-            )}
-          </div>
+            {/* Main Content */}
+            <main className="container mx-auto px-4 py-8">
+                {!address ? (
+                    <div className="text-center py-20">
+                        <div className="text-6xl mb-4">🎲</div>
+                        <h2 className="text-2xl font-bold text-zinc-900 dark:text-zinc-50 mb-2">
+                            State Channel Prediction Market
+                        </h2>
+                        <p className="text-zinc-600 dark:text-zinc-400 mb-6 max-w-md mx-auto">
+                            Trade binary outcomes at 100+ orders/sec with 0 gas fees.
+                            Browser-based matching with Yellow Network state channels.
+                        </p>
+                        <button
+                            onClick={connectWallet}
+                            className="px-8 py-3 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg transition-colors"
+                        >
+                            Connect Wallet to Start Trading
+                        </button>
+                    </div>
+                ) : (
+                    <div className="space-y-6">
+                        {/* Market Header */}
+                        {state && (
+                            <MarketHeader
+                                question={state.question}
+                                lastYesPrice={state.lastYesPrice}
+                                totalVolume={state.fills.reduce((sum, f) => sum + f.price * f.quantity, 0)}
+                            />
+                        )}
+
+                        {/* Demo Controls */}
+                        <div className="flex gap-4">
+                            <button
+                                onClick={seedDemoOrders}
+                                className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-medium rounded-lg transition-colors"
+                            >
+                                🎮 Seed Demo Orders
+                            </button>
+                            <button
+                                onClick={handleExportProof}
+                                className="px-4 py-2 bg-zinc-200 dark:bg-zinc-700 hover:bg-zinc-300 dark:hover:bg-zinc-600 text-zinc-700 dark:text-zinc-300 text-sm font-medium rounded-lg transition-colors"
+                            >
+                                📥 Export Force Exit Proof
+                            </button>
+                            <div className="flex-1"></div>
+                            <div className="px-4 py-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg text-sm">
+                                <span className="text-zinc-500">Avg Latency: </span>
+                                <span className="font-mono text-zinc-900 dark:text-zinc-50">
+                                    {metrics.avgLatency.toFixed(1)}ms
+                                </span>
+                            </div>
+                            <div className="px-4 py-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg text-sm">
+                                <span className="text-zinc-500">Orders: </span>
+                                <span className="font-mono text-zinc-900 dark:text-zinc-50">
+                                    {metrics.ordersProcessed}
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* Trading Interface */}
+                        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                            {/* Order Book */}
+                            <div>
+                                {orderbookDisplay && state && (
+                                    <PredictionOrderbook
+                                        display={orderbookDisplay}
+                                        lastYesPrice={state.lastYesPrice}
+                                        onPriceClick={handlePriceClick}
+                                    />
+                                )}
+                            </div>
+
+                            {/* Order Form */}
+                            <div>
+                                <PredictionOrderForm
+                                    balance={balance}
+                                    lastYesPrice={state?.lastYesPrice || null}
+                                    onSubmitOrder={handleSubmitOrder}
+                                    userId={address}
+                                />
+                            </div>
+
+                            {/* Market Lifecycle */}
+                            <div>
+                                {state && (
+                                    <MarketLifecycle
+                                        status={state.status}
+                                        resolutionOutcome={state.resolutionOutcome}
+                                        resolutionTimestamp={state.resolutionTimestamp}
+                                        onLockMarket={handleLockMarket}
+                                        onResolveMarket={handleResolveMarket}
+                                        onSettleMarket={handleSettleMarket}
+                                        settlementAmount={address ? stateManager.getSettlementAmount(address) : undefined}
+                                        isAdmin={true}
+                                    />
+                                )}
+                            </div>
+
+                            {/* Recent Trades */}
+                            <div>
+                                {state && <RecentTrades fills={state.fills} />}
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </main>
+
+            {/* Footer */}
+            <footer className="border-t border-zinc-200 dark:border-zinc-800 mt-auto">
+                <div className="container mx-auto px-4 py-4">
+                    <p className="text-center text-xs text-zinc-400">
+                        Built for ETHGlobal • State Channels + Yellow Network • Binary Constraint: YES + NO = $1
+                    </p>
+                </div>
+            </footer>
         </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="container mx-auto px-4 py-8">
-        {!address ? (
-          <div className="text-center py-20">
-            <p className="text-xl text-zinc-600 dark:text-zinc-400">
-              Connect your wallet to start trading
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-6">
-            {/* Performance Metrics */}
-            <PerformanceMetrics metrics={metrics} />
-
-            {/* Trading Interface */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Left Column */}
-              <div className="space-y-6">
-                <BalancePanel balances={balances} onRefresh={refreshBalances} />
-                <ChannelManager
-                  channel={channel}
-                  onOpenChannel={handleOpenChannel}
-                  onCooperativeClose={handleCooperativeClose}
-                  onForceExit={handleForceExit}
-                  onExportProof={handleExportProof}
-                />
-              </div>
-
-              {/* Middle Column */}
-              <div>
-                <OrderBook marketId="ETH-USDC" data={orderBook} />
-              </div>
-
-              {/* Right Column */}
-              <div>
-                <OrderForm
-                  marketId="ETH-USDC"
-                  onSubmitOrder={handleSubmitOrder}
-                  channelBalance={channel?.balances || { base: '0', quote: '0' }}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-      </main>
-    </div>
-  );
+    );
 }

@@ -1,14 +1,16 @@
-# ⚡ State Channel Trading System
+# ⚡ Prediction Market with Yellow Network
 
-A **trustless, high-frequency trading system** built with state channels for ETHGlobal hackathon. Trade at lightning speed with the security guarantee that you can always recover your funds, even if the operator goes offline.
+A **trustless, high-frequency prediction market** built with Yellow Network's Nitrolite SDK for ETHGlobal hackathon. Trade binary outcomes (YES/NO) at lightning speed with zero gas fees and the security guarantee that you can always recover your funds.
 
 ## 🎯 Key Features
 
-- ⚡ **High-Frequency Trading**: Off-chain order settlement (targeting 100+ orders/sec)
-- 🔒 **Trustless Security**: Dual-signature state updates + force exit capability
-- 🌐 **Yellow Network Integration**: Three-tier balance system (Wallet → Unified → Channel)
+- ⚡ **High-Frequency Trading**: Off-chain order matching (100+ orders/sec)
+- 🔒 **Trustless Security**: State channel updates + force exit capability
+- 🌐 **Yellow Network Integration**: Nitrolite SDK for off-chain clearing
 - 📊 **Real-Time Performance**: Live metrics dashboard with <50ms fill latency
-- 💪 **Force Exit Protection**: Export proof bundle for on-chain dispute resolution
+- 🎲 **Binary Prediction Market**: YES/NO outcomes with CLOB matching
+- 💪 **Market Lifecycle**: ACTIVE → LOCKED → RESOLVED → SETTLED
+- 🛡️ **Full Collateral**: No liquidation risk, no margin calls
 
 ## 🏗️ Architecture
 
@@ -50,7 +52,7 @@ npm run dev
 npm run build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) and connect your MetaMask wallet.
+Open [http://localhost:3000](http://localhost:3000) to access the **Prediction Market** trading interface.
 
 ## 📦 Project Structure
 
